@@ -599,7 +599,7 @@ func (t *TdxKLineApi) getMACExKLineData(market uint8, code string, klt string, l
 func convertMACSymbolBar(list []proto.MACSymbolBar) []KLineData {
 	result := make([]KLineData, 0, len(list))
 	for i, bar := range list {
-		day := formatMACDateTime(bar.DateTime)
+		day := formatMACDateTime(bar.DateTime.Format("2006-01-02 15:04:05"))
 		kd := KLineData{
 			Day:    day,
 			Open:   fmt.Sprintf("%.2f", bar.Open),
