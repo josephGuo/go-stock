@@ -183,6 +183,11 @@ const danmakuColor = computed(() => {
   return data.darkTheme ? 'color:#fff' : 'color:#000'
 })
 
+// 顶部页签固定吸顶时的背景色（与页面 body 背景一致，避免滚动时内容透出）
+const tabNavBgColor = computed(() => {
+  return data.darkTheme ? 'rgb(16, 16, 20)' : '#ffffff'
+})
+
 const icon = ref('https://raw.githubusercontent.com/ArvinLovegood/go-stock/master/build/appicon.png');
 
 const sortedResults = computed(() => {
@@ -2448,7 +2453,9 @@ watch(modalShow6, (newVal) => {
       </n-gradient-text>
     </template>
   </vue-danmaku>
-  <n-tabs type="card" style="--wails-draggable:no-drag" animated addable :data-currentGroupId="currentGroupId"
+  <n-tabs type="card" style="--wails-draggable:no-drag"
+          :style="{ '--stock-tab-nav-bg': tabNavBgColor }"
+          animated addable :data-currentGroupId="currentGroupId"
           :value="String(currentGroupId)" @add="addTab" @update:value="updateTab" placement="top" @close="(key)=>{delTab(key)}">
 
     <template #suffix>
@@ -3078,6 +3085,14 @@ watch(modalShow6, (newVal) => {
 :deep(.n-tabs-nav .n-tabs-tab) {
   position: relative;
   cursor: pointer;
+}
+
+/* 顶部页签固定吸顶，不随内容滚动 */
+:deep(.n-tabs-nav) {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background-color: var(--stock-tab-nav-bg, #ffffff);
 }
 
 /* 可拖拽标签的样式 */

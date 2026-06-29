@@ -320,6 +320,8 @@ export function NewsPush(arg1:any):Promise<void>;
 
 export function OpenURL(arg1:string):Promise<void>;
 
+export function PromptPlazaRequest(arg1:string,arg2:string,arg3:string,arg4:Record<string, any>,arg5:string,arg6:string):Promise<Record<string, any>>;
+
 export function QuitApp():Promise<void>;
 
 export function ReFleshTelegraphList(arg1:string):Promise<any>;

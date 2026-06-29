@@ -149,6 +149,67 @@ func (a *App) CheckDeviceBinding(token string, apiBase string) map[string]any {
 	return result
 }
 
+// PromptPlazaRequest 以 Go 后端代理的方式请求提示词广场 API，
+// 规避 macOS WKWebView 的 App Transport Security 对明文 HTTP 的限制，
+// 前端不应直接 fetch 远程广场接口。
+// method: GET/POST/PUT/DELETE
+// apiBase: 广场 API 根地址，如 http://go-stock.sparkmemory.top:1918/api
+// path: 接口路径，如 /auth/register
+// query: URL 查询参数，可为 nil；nil 值与空字符串会被跳过，与前端原 fetch 行为一致
+// body: 请求体 JSON 字符串，可为空
+// token: 鉴权 token，可为空
+// 返回响应体解析后的 map（含 code/message/data），网络或解析失败时 code != 0。
+func (a *App) PromptPlazaRequest(method, apiBase, path string, query map[string]any, body, token string) map[string]any {
+	result := map[string]any{"code": -1, "message": "", "data": nil}
+	if apiBase == "" {
+		result["message"] = "apiBase 为空"
+		return result
+	}
+	url := strings.TrimRight(apiBase, "/") + path
+	req := data.SharedHTTPClient.R().SetHeader("Content-Type", "application/json")
+	if token != "" {
+		req = req.SetHeader("Authorization", "Bearer "+token)
+	}
+	if len(query) > 0 {
+		params := make(map[string]string, len(query))
+		for k, v := range query {
+			if v == nil {
+				continue
+			}
+			s := fmt.Sprintf("%v", v)
+			if s == "" {
+				continue
+			}
+			params[k] = s
+		}
+		if len(params) > 0 {
+			req = req.SetQueryParams(params)
+		}
+	}
+	if body != "" {
+		req = req.SetBody(body)
+	}
+
+	resp, err := req.Execute(strings.ToUpper(method), url)
+	if err != nil {
+		result["message"] = err.Error()
+		return result
+	}
+
+	var respData map[string]any
+	if err := json.Unmarshal(resp.Body(), &respData); err != nil {
+		result["message"] = "响应解析失败: " + err.Error()
+		return result
+	}
+	if respData == nil {
+		respData = map[string]any{}
+	}
+	if _, ok := respData["code"]; !ok {
+		respData["code"] = -1
+	}
+	return respData
+}
+
 func (a *App) QuitApp() {
 	if a.ctx != nil {
 		if a.cron != nil {
