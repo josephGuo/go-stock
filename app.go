@@ -2357,7 +2357,8 @@ func (a *App) GetStockEastMoneyKLinePage(stockCode, stockName string, klt string
 
 // GetStockKLineWithFallback 多数据源自动切换 K 线：优先东方财富，不可用时自动切换新浪财经。
 // 返回 KLineSourceResult，包含 data（K 线数组）和 source（实际使用的数据源标识：eastmoney / sina）。
-func (a *App) GetStockKLineWithFallback(stockCode, stockName string, klt string, limit int) *data.KLineSourceResult {
+// adjustFlag 控制复权类型："qfq"前复权、"hfq"后复权、"none"/"0"不复权、""沿用各数据源默认行为。
+func (a *App) GetStockKLineWithFallback(stockCode, stockName string, klt string, limit int, adjustFlag string) *data.KLineSourceResult {
 	if limit <= 0 {
 		limit = 500
 	}
@@ -2368,12 +2369,13 @@ func (a *App) GetStockKLineWithFallback(stockCode, stockName string, klt string,
 	if klt == "" {
 		klt = "101"
 	}
-	return data.FetchKLineWithFallback(stockCode, stockName, klt, limit, "")
+	return data.FetchKLineWithFallback(stockCode, stockName, klt, limit, "", adjustFlag)
 }
 
 // GetStockKLinePageWithFallback 多数据源自动切换 K 线（分页）：优先东方财富，不可用时自动切换新浪财经。
 // end 参数仅对东方财富有效；新浪数据源不支持分页，将返回最新一段数据。
-func (a *App) GetStockKLinePageWithFallback(stockCode, stockName string, klt string, limit int, end string) *data.KLineSourceResult {
+// adjustFlag 控制复权类型："qfq"前复权、"hfq"后复权、"none"/"0"不复权、""沿用各数据源默认行为。
+func (a *App) GetStockKLinePageWithFallback(stockCode, stockName string, klt string, limit int, end string, adjustFlag string) *data.KLineSourceResult {
 	if limit <= 0 {
 		limit = 500
 	}
@@ -2385,7 +2387,7 @@ func (a *App) GetStockKLinePageWithFallback(stockCode, stockName string, klt str
 		klt = "101"
 	}
 	end = strings.TrimSpace(end)
-	return data.FetchKLineWithFallback(stockCode, stockName, klt, limit, end)
+	return data.FetchKLineWithFallback(stockCode, stockName, klt, limit, end, adjustFlag)
 }
 
 // GetChipDistribution 获取/计算股票筹码分布（筹码图）数据（用于前端绘图）。
