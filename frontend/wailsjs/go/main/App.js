@@ -186,6 +186,10 @@ export function DeleteDailyOperationPlan(arg1) {
   return window['go']['main']['App']['DeleteDailyOperationPlan'](arg1);
 }
 
+export function DeleteDailyReview(arg1) {
+  return window['go']['main']['App']['DeleteDailyReview'](arg1);
+}
+
 export function DeleteFilesystemSkill(arg1) {
   return window['go']['main']['App']['DeleteFilesystemSkill'](arg1);
 }
@@ -204,6 +208,10 @@ export function DeleteKnowledgeBase(arg1) {
 
 export function DeleteMCPServer(arg1) {
   return window['go']['main']['App']['DeleteMCPServer'](arg1);
+}
+
+export function DeleteMorningStrategy(arg1) {
+  return window['go']['main']['App']['DeleteMorningStrategy'](arg1);
 }
 
 export function DeletePromptTemplate(arg1) {
@@ -290,6 +298,14 @@ export function FollowFund(arg1) {
   return window['go']['main']['App']['FollowFund'](arg1);
 }
 
+export function GenerateDailyReviewNow(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['GenerateDailyReviewNow'](arg1, arg2, arg3, arg4);
+}
+
+export function GenerateMorningStrategyNow(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['GenerateMorningStrategyNow'](arg1, arg2, arg3, arg4);
+}
+
 export function GetAIResponseResult(arg1) {
   return window['go']['main']['App']['GetAIResponseResult'](arg1);
 }
@@ -320,10 +336,6 @@ export function GetAllBKCodes() {
 
 export function GetAllConceptCodes() {
   return window['go']['main']['App']['GetAllConceptCodes']();
-}
-
-export function GetBKConstituentStocks(arg1) {
-  return window['go']['main']['App']['GetBKConstituentStocks'](arg1);
 }
 
 export function GetAllConceptPlates() {
@@ -392,6 +404,10 @@ export function GetAllStocks(arg1, arg2, arg3, arg4) {
 
 export function GetAllTdxTransactionData(arg1) {
   return window['go']['main']['App']['GetAllTdxTransactionData'](arg1);
+}
+
+export function GetBKConstituentStocks(arg1) {
+  return window['go']['main']['App']['GetBKConstituentStocks'](arg1);
 }
 
 export function GetBKFundFlowList(arg1, arg2) {
@@ -476,6 +492,14 @@ export function GetDailyOperationPlanByID(arg1) {
 
 export function GetDailyOperationPlanList(arg1) {
   return window['go']['main']['App']['GetDailyOperationPlanList'](arg1);
+}
+
+export function GetDailyReviewByDate(arg1) {
+  return window['go']['main']['App']['GetDailyReviewByDate'](arg1);
+}
+
+export function GetDailyReviewList(arg1, arg2) {
+  return window['go']['main']['App']['GetDailyReviewList'](arg1, arg2);
 }
 
 export function GetEffectiveSponsorVip() {
@@ -598,6 +622,14 @@ export function GetKoreaDayKLine(arg1, arg2) {
   return window['go']['main']['App']['GetKoreaDayKLine'](arg1, arg2);
 }
 
+export function GetLatestDailyReview() {
+  return window['go']['main']['App']['GetLatestDailyReview']();
+}
+
+export function GetLatestMorningStrategy() {
+  return window['go']['main']['App']['GetLatestMorningStrategy']();
+}
+
 export function GetLatestTradingDay() {
   return window['go']['main']['App']['GetLatestTradingDay']();
 }
@@ -644,6 +676,14 @@ export function GetMarketStatisticByDate(arg1) {
 
 export function GetMoneyRankSina(arg1) {
   return window['go']['main']['App']['GetMoneyRankSina'](arg1);
+}
+
+export function GetMorningStrategyByDate(arg1) {
+  return window['go']['main']['App']['GetMorningStrategyByDate'](arg1);
+}
+
+export function GetMorningStrategyList(arg1, arg2) {
+  return window['go']['main']['App']['GetMorningStrategyList'](arg1, arg2);
 }
 
 export function GetPolicyNews(arg1, arg2) {

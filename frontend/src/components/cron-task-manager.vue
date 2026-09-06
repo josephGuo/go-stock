@@ -294,6 +294,64 @@
             </n-space>
           </n-card>
           
+          <!-- 每日复盘 / 盘前策略任务的参数配置 UI -->
+          <n-card v-else-if="formData.taskType === 'daily_review' || formData.taskType === 'morning_strategy'" size="small" style="width: 100%">
+            <n-space :vertical="true" :size="12">
+              <!-- 第一行：AI 配置和系统提示词 -->
+              <n-grid :cols="2" :x-gap="12">
+                <n-gi>
+                  <n-form-item label-width="90px" label="AI 配置:">
+                    <n-select
+                      v-model:value="reviewParamsData.aiConfigId"
+                      :options="aiConfigOptions"
+                      placeholder="请选择 AI 配置"
+                      filterable
+                      style="width: 100%"
+                    />
+                  </n-form-item>
+                </n-gi>
+                <n-gi>
+                  <n-form-item label-width="90px" label="系统提示词:">
+                    <n-select
+                      v-model:value="reviewParamsData.sysPromptId"
+                      :options="sysPromptOptions"
+                      placeholder="请选择系统提示词（可选）"
+                      filterable
+                      clearable
+                      style="width: 100%"
+                    />
+                  </n-form-item>
+                </n-gi>
+              </n-grid>
+
+              <!-- 第二行：Agent模式和启用思考 -->
+              <n-grid :cols="2" :x-gap="12">
+                <n-gi>
+                  <n-form-item label-width="90px" label="Agent模式:">
+                    <n-select
+                      v-model:value="reviewParamsData.agentMode"
+                      :options="agentModeOptions"
+                      placeholder="请选择Agent模式"
+                      style="width: 100%"
+                    />
+                  </n-form-item>
+                </n-gi>
+                <n-gi>
+                  <n-form-item label-width="90px" label="启用思考:">
+                    <n-switch v-model:value="reviewParamsData.thinking" size="large">
+                      <template #checked>
+                        开启
+                      </template>
+                      <template #unchecked>
+                        关闭
+                      </template>
+                    </n-switch>
+                  </n-form-item>
+                </n-gi>
+              </n-grid>
+            </n-space>
+          </n-card>
+
           <!-- 其他任务类型仍使用文本输入框 -->
           <n-input
             v-else
@@ -594,6 +652,14 @@ const generatedParamsJson = computed(() => {
       agentMode: marketAnalysisParamsData.agentMode
     }, null, 2)
   }
+  if(formData.taskType==='daily_review' || formData.taskType==='morning_strategy'){
+    return JSON.stringify({
+      aiConfigId: reviewParamsData.aiConfigId,
+      sysPromptId: reviewParamsData.sysPromptId,
+      thinking: reviewParamsData.thinking,
+      agentMode: reviewParamsData.agentMode
+    }, null, 2)
+  }
 
 })
 
@@ -817,6 +883,13 @@ const marketAnalysisParamsData= reactive({
   aiConfigId: 0,
   sysPromptId: 0,
   thinking: true,
+  agentMode: ''
+})
+// 每日复盘 / 盘前策略任务参数
+const reviewParamsData = reactive({
+  aiConfigId: 0,
+  sysPromptId: 0,
+  thinking: false,
   agentMode: ''
 })
 
@@ -1273,6 +1346,19 @@ const handleEdit = async (row) => {
           console.error('解析参数失败:', e)
         }
       }
+
+      // 每日复盘 / 盘前策略任务，解析参数到表单
+      if ((task.taskType === 'daily_review' || task.taskType === 'morning_strategy') && task.params) {
+        try {
+          const parsed = JSON.parse(task.params)
+          reviewParamsData.aiConfigId = parsed.aiConfigId ?? 0
+          reviewParamsData.sysPromptId = parsed.sysPromptId ?? 0
+          reviewParamsData.thinking = parsed.thinking || false
+          reviewParamsData.agentMode = parsed.agentMode || ''
+        } catch (e) {
+          console.error('解析参数失败:', e)
+        }
+      }
       
       showCreateModal.value = true
     }
@@ -1419,6 +1505,12 @@ const resetForm = () => {
     aiConfigId: null,
     sysPromptId: null,
     thinking: true,
+    agentMode: ''
+  })
+  Object.assign(reviewParamsData, {
+    aiConfigId: 0,
+    sysPromptId: 0,
+    thinking: false,
     agentMode: ''
   })
   // 重置 Cron 配置器

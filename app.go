@@ -3324,6 +3324,41 @@ func (a *App) InitCronTasks() {
 			logger.SugaredLogger.Info("已自动创建异动数据保存定时任务")
 		}
 	}
+	if !cronApi.ExistsByTaskType("daily_review") {
+		task := &models.CronTask{
+			Name:     "每日复盘",
+			CronExpr: "0 0 18 * * 1-5", // 交易日 18:00
+			TaskType: "daily_review",
+			Enable:   true,
+			Status:   "active",
+			Params:   `{"aiConfigId":0,"sysPromptId":0,"thinking":false,"agentMode":"","includeLhb":true,"pushFeishu":false,"pushDingDing":false}`,
+			Description: "收盘后自动生成当日复盘报告（市场统计+交易记录+龙虎榜），aiConfigId=0 时使用第一个AI配置；" +
+				"18:00 生成时龙虎榜数据已发布，素材更完整",
+		}
+		err := cronApi.Create(task)
+		if err != nil {
+			logger.SugaredLogger.Errorf("自动创建每日复盘任务失败：%v", err)
+		} else {
+			logger.SugaredLogger.Info("已自动创建每日复盘定时任务")
+		}
+	}
+	if !cronApi.ExistsByTaskType("morning_strategy") {
+		task := &models.CronTask{
+			Name:        "盘前策略",
+			CronExpr:    "0 0 9 * * 1-5", // 交易日 09:00
+			TaskType:    "morning_strategy",
+			Enable:      true,
+			Status:      "active",
+			Params:      `{"aiConfigId":0,"sysPromptId":0,"thinking":false,"agentMode":"","pushFeishu":false,"pushDingDing":false}`,
+			Description: "盘前自动生成当日策略（基于昨日复盘+隔夜外围+龙虎榜+自选股），aiConfigId=0 时使用第一个AI配置",
+		}
+		err := cronApi.Create(task)
+		if err != nil {
+			logger.SugaredLogger.Errorf("自动创建盘前策略任务失败：%v", err)
+		} else {
+			logger.SugaredLogger.Info("已自动创建盘前策略定时任务")
+		}
+	}
 	tasks := cronApi.GetAll()
 	if len(tasks) == 0 {
 		return
@@ -3510,6 +3545,90 @@ func (a *App) ExecuteCronTaskNow(id uint) string {
 //	@return []lo.Tuple2[string, string] 任务类型列表
 func (a *App) GetCronTaskTypes() []lo.Tuple2[string, string] {
 	return agent.NewCronTaskApi().GetTaskTypes()
+}
+
+// ---------------- 每日复盘 / 盘前策略 ----------------
+
+// GenerateDailyReviewNow
+//
+//	@Description: 手动生成每日复盘报告（后台执行，完成后通过 dailyReviewGenerated 事件通知前端）
+//	@param date 报告日期（空串=今天）
+//	@param aiConfigId AI 配置 ID（0=使用第一个 AI 配置）
+//	@param sysPromptId 系统提示词模板 ID（0=内置复盘提示词）
+//	@param agentMode AI 分析模式（""=自动/react/plan_execute/deepagents）
+func (a *App) GenerateDailyReviewNow(date string, aiConfigId int, sysPromptId int, agentMode string) string {
+	go func() {
+		_, err := agent.NewDailyReviewApi().GenerateDailyReview(a.ctx, date, agent.FirstAiConfigId(aiConfigId), sysPromptId, false, agentMode, "manual")
+		if err != nil {
+			logger.SugaredLogger.Errorf("手动生成复盘报告失败：%v", err)
+		}
+	}()
+	return "复盘报告生成中，完成后将自动展示"
+}
+
+// GetDailyReviewByDate 按日期查询复盘报告
+func (a *App) GetDailyReviewByDate(date string) *models.DailyReview {
+	return agent.NewDailyReviewApi().GetDailyReviewByDate(date)
+}
+
+// GetLatestDailyReview 查询最近一条复盘报告
+func (a *App) GetLatestDailyReview() *models.DailyReview {
+	return agent.NewDailyReviewApi().GetLatestDailyReview()
+}
+
+// GetDailyReviewList 分页查询历史复盘报告
+func (a *App) GetDailyReviewList(page int, pageSize int) *models.DailyReviewPageData {
+	return agent.NewDailyReviewApi().GetDailyReviewList(page, pageSize)
+}
+
+// DeleteDailyReview 删除复盘报告
+func (a *App) DeleteDailyReview(id uint) string {
+	err := agent.NewDailyReviewApi().DeleteDailyReview(id)
+	if err != nil {
+		return fmt.Sprintf("删除失败：%v", err)
+	}
+	return "删除成功"
+}
+
+// GenerateMorningStrategyNow
+//
+//	@Description: 手动生成盘前策略（后台执行，完成后通过 morningStrategyGenerated 事件通知前端）
+//	@param date 策略日期（空串=今天）
+//	@param aiConfigId AI 配置 ID（0=使用第一个 AI 配置）
+//	@param sysPromptId 系统提示词模板 ID（0=内置盘前策略提示词）
+//	@param agentMode AI 分析模式（""=自动/react/plan_execute/deepagents）
+func (a *App) GenerateMorningStrategyNow(date string, aiConfigId int, sysPromptId int, agentMode string) string {
+	go func() {
+		_, err := agent.NewMorningStrategyApi().GenerateMorningStrategy(a.ctx, date, agent.FirstAiConfigId(aiConfigId), sysPromptId, false, agentMode, "manual")
+		if err != nil {
+			logger.SugaredLogger.Errorf("手动生成盘前策略失败：%v", err)
+		}
+	}()
+	return "盘前策略生成中，完成后将自动展示"
+}
+
+// GetMorningStrategyByDate 按日期查询盘前策略
+func (a *App) GetMorningStrategyByDate(date string) *models.MorningStrategy {
+	return agent.NewMorningStrategyApi().GetMorningStrategyByDate(date)
+}
+
+// GetLatestMorningStrategy 查询最近一条盘前策略
+func (a *App) GetLatestMorningStrategy() *models.MorningStrategy {
+	return agent.NewMorningStrategyApi().GetLatestMorningStrategy()
+}
+
+// GetMorningStrategyList 分页查询历史盘前策略
+func (a *App) GetMorningStrategyList(page int, pageSize int) *models.MorningStrategyPageData {
+	return agent.NewMorningStrategyApi().GetMorningStrategyList(page, pageSize)
+}
+
+// DeleteMorningStrategy 删除盘前策略
+func (a *App) DeleteMorningStrategy(id uint) string {
+	err := agent.NewMorningStrategyApi().DeleteMorningStrategy(id)
+	if err != nil {
+		return fmt.Sprintf("删除失败：%v", err)
+	}
+	return "删除成功"
 }
 
 // ValidateCronExpr

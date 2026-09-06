@@ -99,6 +99,8 @@ export function DeleteCustomStrategy(arg1:number):Promise<string>;
 
 export function DeleteDailyOperationPlan(arg1:number):Promise<string>;
 
+export function DeleteDailyReview(arg1:number):Promise<string>;
+
 export function DeleteFilesystemSkill(arg1:string):Promise<string>;
 
 export function DeleteKBDocument(arg1:string,arg2:string):Promise<void>;
@@ -108,6 +110,8 @@ export function DeleteKBGraph(arg1:string):Promise<void>;
 export function DeleteKnowledgeBase(arg1:string):Promise<void>;
 
 export function DeleteMCPServer(arg1:number):Promise<string>;
+
+export function DeleteMorningStrategy(arg1:number):Promise<string>;
 
 export function DeletePromptTemplate(arg1:number):Promise<string>;
 
@@ -151,6 +155,10 @@ export function Follow(arg1:string):Promise<string>;
 
 export function FollowFund(arg1:string):Promise<string>;
 
+export function GenerateDailyReviewNow(arg1:string,arg2:number,arg3:number,arg4:string):Promise<string>;
+
+export function GenerateMorningStrategyNow(arg1:string,arg2:number,arg3:number,arg4:string):Promise<string>;
+
 export function GetAIResponseResult(arg1:string):Promise<models.AIResponseResult>;
 
 export function GetAIResponseResultList(arg1:models.AIResponseResultQuery):Promise<models.AIResponseResultPageData>;
@@ -166,8 +174,6 @@ export function GetAiRecommendStocksList(arg1:models.AiRecommendStocksQuery):Pro
 export function GetAllBKCodes():Promise<Array<Record<string, string>>>;
 
 export function GetAllConceptCodes():Promise<Array<Record<string, string>>>;
-
-export function GetBKConstituentStocks(arg1:string):Promise<Array<models.BKConstituentStock>>;
 
 export function GetAllConceptPlates():Promise<Array<data.ConceptPlate>>;
 
@@ -202,6 +208,8 @@ export function GetAllStockInfoList(arg1:data.AllStockInfoQuery):Promise<data.Al
 export function GetAllStocks(arg1:number,arg2:number,arg3:string,arg4:models.TechnicalIndicators):Promise<models.AllStocksResp>;
 
 export function GetAllTdxTransactionData(arg1:string):Promise<any>;
+
+export function GetBKConstituentStocks(arg1:string):Promise<Array<models.BKConstituentStock>>;
 
 export function GetBKFundFlowList(arg1:string,arg2:number):Promise<Array<models.BKFundFlowPoint>>;
 
@@ -244,6 +252,10 @@ export function GetDailyDimensionStats(arg1:string,arg2:string,arg3:number):Prom
 export function GetDailyOperationPlanByID(arg1:number):Promise<models.DailyOperationPlan>;
 
 export function GetDailyOperationPlanList(arg1:models.DailyOperationPlanQuery):Promise<models.DailyOperationPlanPageData>;
+
+export function GetDailyReviewByDate(arg1:string):Promise<models.DailyReview>;
+
+export function GetDailyReviewList(arg1:number,arg2:number):Promise<models.DailyReviewPageData>;
 
 export function GetEffectiveSponsorVip():Promise<Record<string, any>>;
 
@@ -305,6 +317,10 @@ export function GetKnowledgeBase(arg1:string):Promise<agent.KnowledgeBaseInfo>;
 
 export function GetKoreaDayKLine(arg1:string,arg2:number):Promise<any>;
 
+export function GetLatestDailyReview():Promise<models.DailyReview>;
+
+export function GetLatestMorningStrategy():Promise<models.MorningStrategy>;
+
 export function GetLatestTradingDay():Promise<string>;
 
 export function GetLhbDailySummary(arg1:string):Promise<models.LhbDailySummary>;
@@ -328,6 +344,10 @@ export function GetMarketEmotion():Promise<data.MarketEmotion>;
 export function GetMarketStatisticByDate(arg1:string):Promise<Array<models.MarketStatistic>>;
 
 export function GetMoneyRankSina(arg1:string):Promise<Array<Record<string, any>>>;
+
+export function GetMorningStrategyByDate(arg1:string):Promise<models.MorningStrategy>;
+
+export function GetMorningStrategyList(arg1:number,arg2:number):Promise<models.MorningStrategyPageData>;
 
 export function GetPolicyNews(arg1:string,arg2:number):Promise<any>;
 

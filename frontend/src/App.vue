@@ -724,6 +724,62 @@ const menuOptions = ref([
             RouterLink,
             {
               to: {
+                name: 'dailyReview',
+                params: {},
+              },
+              onClick: () => {
+                activeKey.value = 'dailyReview'
+              },
+            },
+            {default: () => '复盘策略'}
+        ),
+    key: 'reviewStrategy',
+    icon: renderIcon(CalendarOutline),
+    children: [
+      {
+        label: () =>
+            h(
+                RouterLink,
+                {
+                  to: {
+                    name: 'dailyReview',
+                    params: {},
+                  },
+                  onClick: () => {
+                    activeKey.value = 'dailyReview'
+                  },
+                },
+                {default: () => '每日复盘'}
+            ),
+        key: 'dailyReview',
+        icon: renderIcon(AnalyticsOutline),
+      },
+      {
+        label: () =>
+            h(
+                RouterLink,
+                {
+                  to: {
+                    name: 'morningStrategy',
+                    params: {},
+                  },
+                  onClick: () => {
+                    activeKey.value = 'morningStrategy'
+                  },
+                },
+                {default: () => '盘前策略'}
+            ),
+        key: 'morningStrategy',
+        icon: renderIcon(TimeOutline),
+      },
+    ]
+  },
+  {
+    label: () =>
+        h(
+            RouterLink,
+            {
+              to: {
                 name: 'agent',
                 query: {
                   name:"Ai智能体",
@@ -1334,6 +1390,8 @@ onBeforeUnmount(() => {
   EventsOff("loadingMsg")
   EventsOff("telegraph")
   EventsOff("newsPush")
+  EventsOff("dailyReviewGenerated")
+  EventsOff("morningStrategyGenerated")
   EventsOff("groupListChanged")
   EventsOff("updateDownloadStart")
   EventsOff("downloadProgress")
@@ -1449,6 +1507,44 @@ onMounted(() => {
             }}, { default: () => data.content }),
           meta: () => h(NText,{type:"warning"}, { default: () => data.source}),
           duration:1000*30 ,
+        })
+      }
+    })
+
+    EventsOn("dailyReviewGenerated", (data) => {
+      if (!data) return
+      if (data.status === 'failed') {
+        notification.create({
+          title: `每日复盘生成失败（${data.date}）`,
+          content: () => h('div', {style: {"text-align": "left", "font-size": "14px", "color": "#f67979"}},
+              {default: () => data.errorMessage || '未知错误'}),
+          duration: 1000 * 30,
+        })
+      } else if (data.status === 'success') {
+        notification.create({
+          title: `每日复盘已生成（${data.date}）`,
+          content: () => h('div', {style: {"text-align": "left", "font-size": "14px"}},
+              {default: () => data.summary || ''}),
+          duration: 1000 * 30,
+        })
+      }
+    })
+
+    EventsOn("morningStrategyGenerated", (data) => {
+      if (!data) return
+      if (data.status === 'failed') {
+        notification.create({
+          title: `盘前策略生成失败（${data.date}）`,
+          content: () => h('div', {style: {"text-align": "left", "font-size": "14px", "color": "#f67979"}},
+              {default: () => data.errorMessage || '未知错误'}),
+          duration: 1000 * 30,
+        })
+      } else if (data.status === 'success') {
+        notification.create({
+          title: `盘前策略已生成（${data.date}）`,
+          content: () => h('div', {style: {"text-align": "left", "font-size": "14px"}},
+              {default: () => data.summary || ''}),
+          duration: 1000 * 30,
         })
       }
     })

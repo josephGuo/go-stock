@@ -13,6 +13,8 @@ import klineAnalysis from "../components/kline-analysis.vue"
 import aiConfigManager from "../components/ai-config-manager.vue"
 import userProfile from "../components/user-profile.vue"
 import homeView from "../components/Home.vue";
+import dailyReview from "../components/DailyReview.vue"
+import morningStrategy from "../components/MorningStrategy.vue"
 
 const routes = [
     { path: '/', redirect: '/home'},
@@ -29,6 +31,8 @@ const routes = [
     { path: '/kline-analysis', component: klineAnalysis,name: 'klineAnalysis' },
     { path: '/ai-configs', component: aiConfigManager,name: 'aiConfigs' },
     { path: '/user-profile', component: userProfile,name: 'userProfile' },
+    { path: '/daily-review', component: dailyReview,name: 'dailyReview' },
+    { path: '/morning-strategy', component: morningStrategy,name: 'morningStrategy' },
 
 ]
 
