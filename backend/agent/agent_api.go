@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -162,6 +163,7 @@ func (receiver StockAiAgent) ChatWithContext(ctx context.Context, question strin
 		var sysPromptOverride string
 		var resumeContextOverride string
 		var skillQuestionBlock string
+		var imagesJSON string
 		if len(optsOverride) > 0 && optsOverride[0] != "" {
 			sysPromptOverride = optsOverride[0]
 		}
@@ -173,6 +175,11 @@ func (receiver StockAiAgent) ChatWithContext(ctx context.Context, question strin
 		}
 		if len(optsOverride) > 3 && optsOverride[3] != "" {
 			skillQuestionBlock = optsOverride[3]
+		}
+		// imagesJSON（optsOverride[4]）：当前提问携带的图片列表 JSON，
+		// 元素为 http(s) 图片外链或 base64 data URL，仅视觉模型生效。
+		if len(optsOverride) > 4 && optsOverride[4] != "" {
+			imagesJSON = optsOverride[4]
 		}
 
 		stockAiAgent, agentErr := receiver.newStockAiAgent(&ctx, aiConfigId, thinkingMode, question, agentMode)
@@ -295,10 +302,63 @@ func (receiver StockAiAgent) ChatWithContext(ctx context.Context, question strin
 		if skillQuestionBlock != "" {
 			userContent = skillQuestionBlock + question
 		}
-		messages = append(messages, &schema.Message{
+		// 视觉理解：解析当前提问携带的图片（http(s) 外链或 base64 data URL）。
+		// 仅视觉模型（AI 配置开启 SupportVision）生效，图片以 OpenAI 兼容 image_url 内容块
+		// 随用户消息下发（含 DeepSeek-Vision / GLM-4V / Qwen-VL 等，参考
+		// https://api-docs.deepseek.com/zh-cn/guides/vision/）；历史消息中的图片不重发。
+		images := parseImagesJSON(imagesJSON)
+		if len(images) > 0 {
+			if aiConfig == nil || !aiConfig.SupportVision {
+				logger.SugaredLogger.Warnf("model does not support vision, dropping %d image(s)", len(images))
+				safeSend(ch, &schema.Message{
+					Role:    schema.Assistant,
+					Content: "❗当前模型未开启视觉理解，图片已被忽略。请在「AI模型服务配置」中为支持视觉的模型开启该选项。",
+				})
+				images = nil
+			}
+		}
+		userMsg := &schema.Message{
 			Role:    schema.User,
 			Content: userContent,
-		})
+		}
+		if len(images) > 0 {
+			if userContent == "" {
+				userContent = "请分析这些图片"
+				userMsg.Content = userContent
+			}
+			// eino OpenAI 兼容实现：UserInputMultiContent 转为 content 内容块数组
+			// （text + image_url）。按模型提供商适配图片字段：
+			//   - OpenAI 系（含 DeepSeek/Qwen/Ark/OpenRouter/硅基流动等）：URL 字段直传
+			//     http(s) 外链或 data URL（OpenAI 兼容 image_url 原生支持两者）；
+			//   - Claude（Anthropic）：http URL 直传，data URL 需拆解为 raw base64 + MIMEType；
+			//   - Gemini / Ollama：不支持 http URL（Gemini 视作 File URI、Ollama 直接报错），
+			//     http 外链需后端下载转 base64，data URL 拆解后填 Base64Data。
+			imageParts, imgErr := buildVisionImageParts(images, aiConfig)
+			if imgErr != nil {
+				logger.SugaredLogger.Errorf("build vision image parts failed: %v", imgErr)
+				safeSend(ch, &schema.Message{
+					Role:    schema.Assistant,
+					Content: "❗图片处理失败：" + imgErr.Error(),
+				})
+				images = nil
+			} else {
+				parts := make([]schema.MessageInputPart, 0, len(imageParts)+1)
+				parts = append(parts, schema.MessageInputPart{
+					Type: schema.ChatMessagePartTypeText,
+					Text: userContent,
+				})
+				parts = append(parts, imageParts...)
+				// 关键：Content 与 UserInputMultiContent 必须互斥。openai SDK 的
+				// ChatCompletionMessage 序列化在 Content 与 MultiContent 同时非空时直接报错
+				// （"can't use both Content and MultiContent properties simultaneously"），
+				// 文本已作为第一个 text 块存在于 parts 中，此处必须清空 Content。
+				userMsg.Content = ""
+				userMsg.UserInputMultiContent = parts
+				logger.SugaredLogger.Infof("vision: 下发 %d 张图片（config=%s, model=%s）",
+					len(imageParts), aiConfig.Name, aiConfig.ModelName)
+			}
+		}
+		messages = append(messages, userMsg)
 
 		if memoryService != nil {
 			// 注意：用户消息不再在此处提前保存，改为在各 Agent 执行成功后与助手消息一起保存，
@@ -1640,6 +1700,191 @@ func truncateString(s string, maxLen int) string {
 	return s[:maxLen] + "..."
 }
 
+// parseImagesJSON 解析前端传入的图片列表 JSON（元素为 http(s) 外链或 base64 data URL），
+// 解析失败或无有效项时返回 nil。
+func parseImagesJSON(imagesJSON string) []string {
+	imagesJSON = strings.TrimSpace(imagesJSON)
+	if imagesJSON == "" {
+		return nil
+	}
+	var images []string
+	if err := json.Unmarshal([]byte(imagesJSON), &images); err != nil {
+		logger.SugaredLogger.Warnf("parseImagesJSON failed: %v", err)
+		return nil
+	}
+	valid := make([]string, 0, len(images))
+	for _, img := range images {
+		if img = strings.TrimSpace(img); img != "" {
+			valid = append(valid, img)
+		}
+	}
+	if len(valid) == 0 {
+		return nil
+	}
+	return valid
+}
+
+// maxVisionImageDownloadSize 后端代下图片（Gemini/Ollama 不支持 http URL）的单图上限 10MB。
+const maxVisionImageDownloadSize = 10 * 1024 * 1024
+
+// buildVisionImageParts 按模型提供商把图片列表（http(s) 外链或 base64 data URL）转换为
+// eino 多模态内容块，抹平各组件对 image_url 的差异：
+//   - OpenAI 系（默认兼容/DeepSeek/Qwen/Ark/OpenRouter）：URL 字段直传（http 外链与 data URL 均原生支持）；
+//   - Claude：http URL 走 URL 字段；data URL 拆解为 raw base64 + MIMEType 走 Base64Data
+//     （Anthropic 组件禁止 Base64Data 带 data: 前缀，URL 字段也不接受 data URL）；
+//   - Gemini / Ollama：不支持 http URL（Gemini 将 URL 视作 File URI、Ollama 直接报错），
+//     http 外链由后端下载转 raw base64，data URL 拆解，统一走 Base64Data 字段。
+func buildVisionImageParts(images []string, aiConfig *data.AIConfig) ([]schema.MessageInputPart, error) {
+	if aiConfig == nil {
+		aiConfig = &data.AIConfig{}
+	}
+	provider := detectChatModelProvider(
+		strings.ToLower(normalizeChatModelBaseURL(aiConfig.BaseUrl)), aiConfig.ModelName)
+
+	parts := make([]schema.MessageInputPart, 0, len(images))
+	for _, img := range images {
+		img = strings.TrimSpace(img)
+		if img == "" {
+			continue
+		}
+		isDataURL := strings.HasPrefix(img, "data:")
+		switch provider {
+		case providerAnthropic:
+			if isDataURL {
+				mimeType, raw, err := splitDataURL(img)
+				if err != nil {
+					return nil, fmt.Errorf("解析 base64 图片失败: %w", err)
+				}
+				p := raw
+				parts = append(parts, schema.MessageInputPart{
+					Type: schema.ChatMessagePartTypeImageURL,
+					Image: &schema.MessageInputImage{
+						MessagePartCommon: schema.MessagePartCommon{
+							Base64Data: &p,
+							MIMEType:   mimeType,
+						},
+					},
+				})
+			} else {
+				u := img
+				parts = append(parts, schema.MessageInputPart{
+					Type: schema.ChatMessagePartTypeImageURL,
+					Image: &schema.MessageInputImage{
+						MessagePartCommon: schema.MessagePartCommon{URL: &u},
+					},
+				})
+			}
+		case providerGemini, providerOllama:
+			// Gemini genai.NewPartFromBytes 与 Ollama 组件均要求 MIMEType
+			mimeType, raw, err := imageDataToBase64(img, true)
+			if err != nil {
+				return nil, err
+			}
+			p := raw
+			parts = append(parts, schema.MessageInputPart{
+				Type: schema.ChatMessagePartTypeImageURL,
+				Image: &schema.MessageInputImage{
+					MessagePartCommon: schema.MessagePartCommon{
+						Base64Data: &p,
+						MIMEType:   mimeType,
+					},
+				},
+			})
+		default:
+			// OpenAI 兼容系：URL 字段直传（http 外链 / data URL 均可）
+			u := img
+			parts = append(parts, schema.MessageInputPart{
+				Type: schema.ChatMessagePartTypeImageURL,
+				Image: &schema.MessageInputImage{
+					MessagePartCommon: schema.MessagePartCommon{URL: &u},
+				},
+			})
+		}
+	}
+	return parts, nil
+}
+
+// splitDataURL 拆解 data URL（data:image/png;base64,xxxx）为 MIMEType 与 raw base64。
+func splitDataURL(dataURL string) (mimeType, raw string, err error) {
+	// data:<mime>[;base64],<data>
+	if !strings.HasPrefix(dataURL, "data:") {
+		return "", "", fmt.Errorf("不是有效的 data URL")
+	}
+	rest := dataURL[len("data:"):]
+	commaIdx := strings.Index(rest, ",")
+	if commaIdx < 0 {
+		return "", "", fmt.Errorf("data URL 缺少数据段")
+	}
+	header := rest[:commaIdx]
+	mimeType = strings.TrimSuffix(header, ";base64")
+	if mimeType == "" || !strings.Contains(mimeType, "/") {
+		return "", "", fmt.Errorf("data URL 缺少 MIME 类型")
+	}
+	return mimeType, rest[commaIdx+1:], nil
+}
+
+// imageDataToBase64 把 data URL 拆解或 http 外链下载为 raw base64 + MIMEType，
+// 供 Gemini / Ollama（仅接受 Base64Data）使用。ollama 需要 MIMEType，gemini 的
+// decodeBase64Data 对 MIMEType 容错（空值时按 data URL 前缀解析）。
+func imageDataToBase64(img string, needMime bool) (mimeType, raw string, err error) {
+	if strings.HasPrefix(img, "data:") {
+		return splitDataURL(img)
+	}
+	if !strings.HasPrefix(img, "http://") && !strings.HasPrefix(img, "https://") {
+		return "", "", fmt.Errorf("不支持的图片格式（仅 http(s) 外链或 data URL）")
+	}
+	// 下载外链图片转 base64
+	resp, err := data.CreateHTTPClientWithTimeout(60 * time.Second).R().Get(img)
+	if err != nil {
+		return "", "", fmt.Errorf("下载图片失败: %w", err)
+	}
+	if resp.IsError() {
+		return "", "", fmt.Errorf("下载图片失败: HTTP %d", resp.StatusCode())
+	}
+	body := resp.Body()
+	if len(body) == 0 {
+		return "", "", fmt.Errorf("下载图片为空")
+	}
+	if len(body) > maxVisionImageDownloadSize {
+		return "", "", fmt.Errorf("图片超过 10MB 限制")
+	}
+	m := resp.Header().Get("Content-Type")
+	if needMime {
+		if idx := strings.Index(m, ";"); idx > 0 {
+			m = m[:idx]
+		}
+		if !strings.Contains(m, "/") {
+			// 常见兜底：图床外链 Content-Type 缺失时按扩展名推断
+			m = mimeTypeFromImageURL(img)
+		}
+		if m == "" {
+			return "", "", fmt.Errorf("无法识别图片 MIME 类型")
+		}
+	} else {
+		m = ""
+	}
+	return m, base64.StdEncoding.EncodeToString(body), nil
+}
+
+// mimeTypeFromImageURL 按图片 URL 扩展名推断 MIME 类型。
+func mimeTypeFromImageURL(u string) string {
+	lower := strings.ToLower(u)
+	switch {
+	case strings.Contains(lower, ".png"):
+		return "image/png"
+	case strings.Contains(lower, ".gif"):
+		return "image/gif"
+	case strings.Contains(lower, ".webp"):
+		return "image/webp"
+	case strings.Contains(lower, ".bmp"):
+		return "image/bmp"
+	case strings.Contains(lower, ".avif"):
+		return "image/avif"
+	default:
+		return "image/jpeg"
+	}
+}
+
 // validateAndFixMessages 验证并修复消息序列，确保兼容各类模型API的消息格式要求。
 // 处理：1)移除空消息 2)去除连续重复User消息 3)修复孤立的Tool消息 4)确保消息序列合法
 func validateAndFixMessages(messages []*schema.Message) []*schema.Message {
@@ -1647,13 +1892,13 @@ func validateAndFixMessages(messages []*schema.Message) []*schema.Message {
 		return messages
 	}
 
-	// 1. 移除空消息
+	// 1. 移除空消息（含 UserInputMultiContent 的多模态消息不算空）
 	var cleaned []*schema.Message
 	for _, msg := range messages {
 		if msg == nil {
 			continue
 		}
-		if msg.Content == "" && len(msg.ToolCalls) == 0 && msg.ToolCallID == "" && msg.ReasoningContent == "" {
+		if msg.Content == "" && len(msg.ToolCalls) == 0 && msg.ToolCallID == "" && msg.ReasoningContent == "" && len(msg.UserInputMultiContent) == 0 {
 			continue
 		}
 		cleaned = append(cleaned, msg)
