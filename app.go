@@ -3681,6 +3681,41 @@ func (a *App) InitCronTasks() {
 			logger.SugaredLogger.Info("已自动创建盘前策略定时任务")
 		}
 	}
+	if !cronApi.ExistsByTaskType("recommend_backtest") {
+		// 为 3/5/10/20/30 交易日五种持有期各建一个每交易日自动执行的回测任务：
+		// 时间依次错开 10 分钟——回测内部按持有期串行执行（见 backtestRunLock），
+		// 同时触发时后到的那个会被跳过，错开可保证每个周期当天都能跑完。
+		periods := []int{3, 5, 10, 20, 30}
+		cronExprs := []string{
+			"0 30 18 * * 1-5", // 3 日：18:30
+			"0 40 18 * * 1-5", // 5 日：18:40
+			"0 50 18 * * 1-5", // 10 日：18:50
+			"0 0 19 * * 1-5",  // 20 日：19:00
+			"0 10 19 * * 1-5", // 30 日：19:10
+		}
+		for i, days := range periods {
+			name := fmt.Sprintf("推荐回测(%d日)", days)
+			if cronApi.ExistsByName(name) {
+				continue
+			}
+			task := &models.CronTask{
+				Name:     name,
+				CronExpr: cronExprs[i],
+				TaskType: "recommend_backtest",
+				Enable:   true,
+				Status:   "active",
+				Params:   fmt.Sprintf(`{"periodDays":%d}`, days),
+				Description: fmt.Sprintf("收盘后自动核算 AI 历史推荐在推荐日之后 %d 个交易日的持有期收益及其相对沪深300 的超额收益，"+
+					"写入「推荐回测统计」（页面上按持有期切换查看）；已回测记录自动跳过，重复执行不会产生重复数据", days),
+			}
+			err := cronApi.Create(task)
+			if err != nil {
+				logger.SugaredLogger.Errorf("自动创建推荐回测任务失败：%v", err)
+			} else {
+				logger.SugaredLogger.Infof("已自动创建推荐回测定时任务：%s", name)
+			}
+		}
+	}
 	tasks := cronApi.GetAll()
 	if len(tasks) == 0 {
 		return
@@ -3700,6 +3735,40 @@ func (a *App) InitCronTasks() {
 		}
 		a.setCronEntry(convertor.ToString(taskCopy.ID)+"_"+taskCopy.Name, entryID)
 	}
+	a.catchUpRecommendBacktest(cronApi)
+}
+
+// recommendBacktestCatchUpHours 推荐回测启动补偿阈值：距上次回测超过该时长则开机补跑一次。
+// 取 20 小时（<24 小时）既保证"每天至少执行一次"，又避免同一天多次启动重复执行。
+const recommendBacktestCatchUpHours = 20
+
+// catchUpRecommendBacktest 推荐回测启动补偿：定时任务只有在应用运行到触发时刻才会执行，
+// 用户收盘后未开机就会整天漏跑。对每个超过阈值未执行的持有期任务依次后台补跑；
+// 回测对"推荐 + 持有期"只核算一次（已回测记录自动跳过），故补跑不会产生重复数据。
+func (a *App) catchUpRecommendBacktest(cronApi *agent.CronTaskApi) {
+	var stale []models.CronTask
+	for _, t := range cronApi.GetAll() {
+		if t.TaskType != "recommend_backtest" {
+			continue
+		}
+		if t.LastRunAt != nil && time.Since(*t.LastRunAt) < recommendBacktestCatchUpHours*time.Hour {
+			continue
+		}
+		stale = append(stale, t)
+	}
+	if len(stale) == 0 {
+		return
+	}
+	logger.SugaredLogger.Infof("推荐回测任务超过 %d 小时未执行（%d 个），启动后后台依次补跑", recommendBacktestCatchUpHours, len(stale))
+	// 串行执行：回测内部为串行锁，并发触发会被跳过，故在一个 goroutine 中依次补跑
+	go func(list []models.CronTask) {
+		defer PanicHandler()
+		for i := range list {
+			if err := agent.NewCronTaskApi().ExecuteTask(a.ctx, &list[i]); err != nil {
+				logger.SugaredLogger.Errorf("推荐回测启动补偿执行失败：%v %s", err, list[i].Name)
+			}
+		}
+	}(stale)
 }
 
 // AbortSummaryStockNews 取消当前进行中的 SummaryStockNews 流式回答
@@ -4479,39 +4548,39 @@ func (a *App) RunRecommendBacktest(periodDays int) (string, error) {
 	return agent.NewRecommendBacktestApi().RunBacktest(periodDays)
 }
 
-// ListRecommendBacktest 分页查询回测结果
-func (a *App) ListRecommendBacktest(page, pageSize int) (agent.BacktestPageData, error) {
-	return agent.NewRecommendBacktestApi().ListBacktest(page, pageSize)
+// ListRecommendBacktest 分页查询回测结果（periodDays<=0 表示不限持有期）
+func (a *App) ListRecommendBacktest(page, pageSize, periodDays int) (agent.BacktestPageData, error) {
+	return agent.NewRecommendBacktestApi().ListBacktest(page, pageSize, periodDays)
 }
 
-// ListRecommendBacktestByPrompt 按提示词过滤分页查询回测结果
-func (a *App) ListRecommendBacktestByPrompt(page, pageSize int, prompt, promptType string) (agent.BacktestPageData, error) {
-	return agent.NewRecommendBacktestApi().ListBacktestByPrompt(page, pageSize, prompt, promptType)
+// ListRecommendBacktestByPrompt 按提示词过滤分页查询回测结果（periodDays<=0 表示不限持有期）
+func (a *App) ListRecommendBacktestByPrompt(page, pageSize int, prompt, promptType string, periodDays int) (agent.BacktestPageData, error) {
+	return agent.NewRecommendBacktestApi().ListBacktestByPrompt(page, pageSize, prompt, promptType, periodDays)
 }
 
-// GetRecommendBacktestStats 获取回测聚合统计
-func (a *App) GetRecommendBacktestStats() (*agent.BacktestStats, error) {
-	return agent.NewRecommendBacktestApi().BacktestStats()
+// GetRecommendBacktestStats 获取回测聚合统计（periodDays<=0 表示混合全部持有期）
+func (a *App) GetRecommendBacktestStats(periodDays int) (*agent.BacktestStats, error) {
+	return agent.NewRecommendBacktestApi().BacktestStats(periodDays)
 }
 
 // GetPromptTemplateBacktestStats 获取按提示词模板聚合的回测统计（不含净值曲线，按评分降序）
-func (a *App) GetPromptTemplateBacktestStats() ([]*agent.TemplateStat, error) {
-	return agent.NewRecommendBacktestApi().TemplateBacktestStats()
+func (a *App) GetPromptTemplateBacktestStats(periodDays int) ([]*agent.TemplateStat, error) {
+	return agent.NewRecommendBacktestApi().TemplateBacktestStats(periodDays)
 }
 
 // GetPromptTemplateBacktestDetail 获取单个提示词模板的回测统计（含净值曲线）
-func (a *App) GetPromptTemplateBacktestDetail(templateId int) (*agent.TemplateStat, error) {
-	return agent.NewRecommendBacktestApi().TemplateBacktestDetail(templateId)
+func (a *App) GetPromptTemplateBacktestDetail(templateId, periodDays int) (*agent.TemplateStat, error) {
+	return agent.NewRecommendBacktestApi().TemplateBacktestDetail(templateId, periodDays)
 }
 
-// ListRecommendBacktestByTemplate 按提示词模板 ID 过滤分页查询回测结果
-func (a *App) ListRecommendBacktestByTemplate(page, pageSize, templateId int) (agent.BacktestPageData, error) {
-	return agent.NewRecommendBacktestApi().ListBacktestByTemplate(page, pageSize, templateId)
+// ListRecommendBacktestByTemplate 按提示词模板 ID 过滤分页查询回测结果（periodDays<=0 表示不限持有期）
+func (a *App) ListRecommendBacktestByTemplate(page, pageSize, templateId, periodDays int) (agent.BacktestPageData, error) {
+	return agent.NewRecommendBacktestApi().ListBacktestByTemplate(page, pageSize, templateId, periodDays)
 }
 
-// ListRecommendBacktestBySkill 按技能 ID（目录名）过滤分页查询回测结果
-func (a *App) ListRecommendBacktestBySkill(page, pageSize int, skillId string) (agent.BacktestPageData, error) {
-	return agent.NewRecommendBacktestApi().ListBacktestBySkill(page, pageSize, skillId)
+// ListRecommendBacktestBySkill 按技能 ID（目录名）过滤分页查询回测结果（periodDays<=0 表示不限持有期）
+func (a *App) ListRecommendBacktestBySkill(page, pageSize int, skillId string, periodDays int) (agent.BacktestPageData, error) {
+	return agent.NewRecommendBacktestApi().ListBacktestBySkill(page, pageSize, skillId, periodDays)
 }
 
 // CreatePromptBacktestTask 创建并启动提示词模板主动回测任务（异步执行，进度经 promptBacktestProgress 事件推送）
