@@ -28,7 +28,7 @@ import { makeToggle } from './kline/indicators/toggle'
 import { parseNumStr, formatPrice2, formatVolumeCn, formatAmountCn, formatPctField, formatSigned2 } from './kline/format'
 import { createMeasurePrimitive } from './kline/measurePrimitive'
 import { createWavePrimitive } from './kline/wavePrimitive'
-import { createVolumeProfilePrimitive } from './kline/volumeProfilePrimitive'
+import { createVolumeProfilePrimitive, POC_COLOR } from './kline/volumeProfilePrimitive'
 import { createTDSequentialPrimitive } from './kline/tdSequentialPrimitive'
 import { createDivergencePrimitive } from './kline/divergencePrimitive'
 import { createBuySellPrimitive } from './kline/buySellPrimitive'
@@ -449,6 +449,9 @@ let wavePrimitive = null
 let volumeProfilePrimitive = null
 /** VPVR 用的 OHLCV 缓存（按 mergedRawRowsVersion 失效，避免每帧重排序） */
 const volumeProfileBarsCache = { version: -1, data: null }
+/** POC 数值标签（挂在价格刻度上；横向虚线仍由 primitive 画，这里只取轴上的 tag） */
+let pocPriceLineHandle = null
+let pocTagRaf = 0
 /** 「神奇九转」primitive 实例（数字标记叠加层） */
 let tdSequentialPrimitive = null
 /** 九转计数缓存（按 mergedRawRowsVersion 失效） */
@@ -3559,9 +3562,53 @@ function getVolumeProfileBars() {
   return volumeProfileBarsCache.data
 }
 
+/** 移除价格刻度上的 POC 数值标签 */
+function clearPocPriceLine() {
+  if (pocTagRaf) {
+    cancelAnimationFrame(pocTagRaf)
+    pocTagRaf = 0
+  }
+  if (pocPriceLineHandle && candleSeries) {
+    try { candleSeries.removePriceLine(pocPriceLineHandle) } catch { /* ignore */ }
+  }
+  pocPriceLineHandle = null
+}
+
+/** 把当前 POC 价格同步到价格刻度；price 为 null 表示当前无 POC（无数据或可见区间为空） */
+function applyPocPriceLine(price) {
+  if (!candleSeries) return
+  if (price == null) {
+    clearPocPriceLine()
+    return
+  }
+  if (pocPriceLineHandle) {
+    pocPriceLineHandle.applyOptions({ price })
+    return
+  }
+  pocPriceLineHandle = candleSeries.createPriceLine({
+    price,
+    color: POC_COLOR,
+    lineWidth: 1,
+    lineStyle: LineStyle.Dashed,
+    // 横向虚线由 volumeProfilePrimitive 绘制，这里只要刻度上那枚 POC 数值标签
+    lineVisible: false,
+    axisLabelVisible: true,
+    title: 'POC',
+  })
+}
+
+/** primitive 在图表绘制周期内回调，延到下一帧再动价格线，避免在绘制过程中改图 */
+function onPocPriceChange(price) {
+  if (pocTagRaf) cancelAnimationFrame(pocTagRaf)
+  pocTagRaf = requestAnimationFrame(() => {
+    pocTagRaf = 0
+    applyPocPriceLine(price)
+  })
+}
+
 function ensureVolumeProfilePrimitive() {
   if (volumeProfilePrimitive || !candleSeries) return
-  volumeProfilePrimitive = createVolumeProfilePrimitive(candleSeries, getVolumeProfileBars)
+  volumeProfilePrimitive = createVolumeProfilePrimitive(candleSeries, getVolumeProfileBars, onPocPriceChange)
 }
 
 /** 按开关状态挂载/卸载成交量分布 primitive（开关点击与指标重建两条路径都走这里） */
@@ -3569,11 +3616,12 @@ function syncVolumeProfilePrimitive() {
   if (showVolumeProfile.value) {
     ensureVolumeProfilePrimitive()
     volumeProfilePrimitive?.requestRedraw()
-  } else if (volumeProfilePrimitive) {
-    if (candleSeries) {
+  } else {
+    if (volumeProfilePrimitive && candleSeries) {
       try { candleSeries.detachPrimitive(volumeProfilePrimitive) } catch { /* ignore */ }
     }
     volumeProfilePrimitive = null
+    clearPocPriceLine()
   }
 }
 
@@ -4775,6 +4823,7 @@ function disposeChart() {
       try { candleSeries.detachPrimitive(volumeProfilePrimitive) } catch { /* ignore */ }
     }
     volumeProfilePrimitive = null
+    clearPocPriceLine()
     if (tdSequentialPrimitive && candleSeries) {
       try { candleSeries.detachPrimitive(tdSequentialPrimitive) } catch { /* ignore */ }
     }
@@ -5151,12 +5200,12 @@ async function loadData() {
     if (!candles.length) {
       errorText.value = isBinanceCode.value
         ? (src === 'binance-futures-invalid-symbol'
-            ? '币安合约代码无效（示例：bn:BTCUSDT）'
-            : '币安合约数据不可达：请在「设置 → 币安合约代理」中配置专用代理后重试')
+            ? '合约代码无效（示例：bn:BTCUSDT）'
+            : '合约数据不可达：请在「设置 → 合约代理」中配置代理后重试')
         : isBitgetCode.value
           ? (src === 'bitget-futures-invalid-symbol'
               ? '美股永续合约代码无效（示例：bt:AAPLUSDT）'
-              : '美股永续合约数据不可达：请在「设置 → Bitget合约代理」中配置专用代理后重试')
+              : '美股永续合约数据不可达：请在「设置 → 合约代理」中配置代理后重试')
           : '暂无 K 线数据（如 600519.SH、000001.SZ、00700.HK、AAPL.US）'
       candleSeries?.setData([])
       volSeries?.setData([])
