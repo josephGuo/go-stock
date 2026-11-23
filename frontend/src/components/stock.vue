@@ -15,9 +15,11 @@ import {
   GetConfig,
   GetEffectiveSponsorVip,
   GetFollowList,
+  GetFollowStockInfos,
   GetGroupList,
   GetPromptTemplates,
   GetStockConceptsByStockCode,
+  GetStockHolderNumData,
   GetStockKLine,
   GetStockList,
   GetStockMinutePriceLineData,
@@ -32,7 +34,6 @@ import {
   IsTradingDay,
   GetStockRealTimePrice,
   GetVersionInfo,
-  Greet,
   InitializeGroupSort,
   NewChatStream,
   OpenURL,
@@ -128,7 +129,9 @@ const tipsRef = ref(null)
 const message = useMessage()
 const notify = useNotification()
 const stocks = ref([])
+const stockCodeSet = ref(new Set())
 const results = ref({})
+const resultKeyByCode = new Map()
 const stockList = ref([])
 const followList = ref([])
 const groupList = ref([])
@@ -474,6 +477,9 @@ const aiAnalysisTimeout = ref(null)
 
 const currentGroupId = ref(0)
 
+watch(stocks, (codes) => {
+  stockCodeSet.value = new Set(codes)
+}, { deep: true, flush: 'sync' })
 
 const theme = computed(() => {
   return data.darkTheme ? 'dark' : 'light'
@@ -503,16 +509,33 @@ const groupResults = computed(() => {
   if (currentGroupId.value === 0) {
     return sortedResults.value
   }
-  // 用 Set 替换 Array.includes，避免在自选股数量多时退化为 O(n^2) 查找
-  const codeSet = new Set(stocks.value)
   const group = {}
   for (const key in sortedResults.value) {
     const item = sortedResults.value[key]
-    if (item && codeSet.has(item['股票代码'])) {
+    if (item && stockCodeSet.value.has(item['股票代码'])) {
       group[key] = item
     }
   }
   return group
+})
+
+// 当前分组内还没有行情数据的股票（用于页签切换时的占位骨架卡片）
+const pendingGroupStocks = computed(() => {
+  if (currentGroupId.value === 0) return []
+  const quoted = new Set()
+  for (const value of Object.values(results.value)) {
+    if (value?.['股票代码']) quoted.add(value['股票代码'])
+  }
+  const nameByCode = new Map()
+  for (const item of followList.value || []) {
+    const code = normalizeFollowStockCode(item.StockCode)
+    if (code && !nameByCode.has(code)) nameByCode.set(code, item.Name)
+  }
+  const items = []
+  for (const code of stocks.value) {
+    if (!quoted.has(code)) items.push({ StockCode: code, Name: nameByCode.get(code) || code })
+  }
+  return items
 })
 
 // ——「全部」标签页：表格分页 + 搜索 ——
@@ -681,6 +704,30 @@ const allTableColumns = [
       }
       // >1 放量（红），<1 缩量（绿），便于快速识别是否放量
       return h(NText, { type: v >= 1 ? 'error' : 'success' }, { default: () => v.toFixed(2) })
+    }
+  },
+  {
+    title: '股东户数', key: 'holderNum', width: 150,
+    sorter: (a, b) => Number(holderInfoMap.value[a['股票代码']]?.HOLDER_TOTAL_NUM || 0) - Number(holderInfoMap.value[b['股票代码']]?.HOLDER_TOTAL_NUM || 0),
+    render(row) {
+      const item = holderInfoMap.value[row['股票代码']]
+      if (!item) {
+        return h(NText, { depth: 3, style: 'font-size:12px;' }, { default: () => '—' })
+      }
+      const ratio = Number(item.TOTAL_NUM_RATIO)
+      const line1 = [
+        h(NText, { style: 'font-size:12px;' }, { default: () => holderNumText(item) })
+      ]
+      if (isFinite(ratio) && ratio !== 0) {
+        line1.push(h(NText, { type: holderRatioType(item), style: 'font-size:12px; margin-left:4px;' },
+          { default: () => `${ratio >= 0 ? '+' : ''}${ratio.toFixed(2)}%` }))
+      }
+      const children = [h('div', { style: 'display:flex; align-items:center;' }, line1)]
+      if (item.HOLD_FOCUS) {
+        children.push(h('div', { style: 'font-size:12px; color:var(--n-text-color-disabled, #888);' },
+          `${item.HOLD_FOCUS} (${holderDateText(item)}报告期)`))
+      }
+      return h('div', { style: 'line-height:1.4;' }, children)
     }
   },
   {
@@ -942,7 +989,7 @@ onBeforeMount(() => {
   })
 
   EventsOn("stock_price", (data) => {
-    updateData(data)
+    queueStockUpdate(data)
   })
 
   EventsOn("refreshFollowList", (data) => {
@@ -1124,24 +1171,7 @@ onMounted(() => {
     initDraggableTabs();
   });
 
-  message.loading("Loading...")
-  GetFollowList(currentGroupId.value).then(result => {
-
-    followList.value = result
-    for (const followedStock of result) {
-      if (followedStock.StockCode.startsWith("us")) {
-        followedStock.StockCode = "gb_" + followedStock.StockCode.replace("us", "").toLowerCase()
-      }
-      if (!stocks.value.includes(followedStock.StockCode)) {
-        stocks.value.push(followedStock.StockCode)
-      }
-      Greet(followedStock.StockCode).then(result => {
-        updateData(result)
-      })
-    }
-    //monitor()
-    message.destroyAll()
-  })
+  loadFollowStocks(currentGroupId.value, true)
 
   GetVersionInfo().then((res) => {
     icon.value = res.icon
@@ -1248,6 +1278,8 @@ onBeforeUnmount(() => {
   EventsOff("loadingDone")
 
   cleanupDraggableTabs()
+  if (stockUpdateFrame) cancelAnimationFrame(stockUpdateFrame)
+  stockUpdateQueue.clear()
 
 })
 
@@ -1530,9 +1562,26 @@ function blinkBorder(findId) {
   }
 }
 
-async function updateData(result) {
-  ////console.log("stock_price",result['日期'],result['时间'],result['股票代码'],result['股票名称'],result['当前价格'],result['盘前盘后'])
+function normalizeFollowStockCode(code) {
+  const value = String(code || '').toLowerCase()
+  return value.startsWith('us') ? `gb_${value.slice(2)}` : value
+}
 
+function setFollowStocks(items) {
+  const codes = []
+  const seen = new Set()
+  for (const item of items || []) {
+    const code = normalizeFollowStockCode(item.StockCode)
+    if (!code || seen.has(code)) continue
+    seen.add(code)
+    codes.push(code)
+  }
+  stocks.value = codes
+}
+
+function prepareStockResult(result, previous = null) {
+  ////console.log("stock_price",result['日期'],result['时间'],result['股票代码'],result['股票名称'],result['当前价格'],result['盘前盘后'])
+  if (!result || !result['股票代码']) return null
   if (result["当前价格"] <= 0) {
     result["当前价格"] = result["卖一报价"]
   }
@@ -1569,37 +1618,241 @@ async function updateData(result) {
     checkPriceLineAlerts(result)
   }
 
-  // 行情系高频推送，避免整体重建 results 触发全卡片重渲染：
-  // 只移除同一股票（sort 变化导致 key 变化时）的旧条目，再写入新条目。
   const _stockCode = result["股票代码"]
   result.key = GetSortKey(result.sort, _stockCode)
-  let _prev = null
-  for (const oldKey in results.value) {
-    const old = results.value[oldKey]
-    if (old && old["股票代码"] === _stockCode) {
-      _prev = old
-      if (oldKey !== result.key) delete results.value[oldKey]
-      break
-    }
-  }
-  // 缓存上一次推送的数值，供 n-number-animation 平滑过渡（替代 from=0 的高频重启动画）
-  result.lastChangePercent = _prev ? _prev.changePercent : 0
-  result.lastProfitAmountToday = _prev ? _prev.profitAmountToday : 0
-  results.value[result.key] = result
-  if (!stocks.value.includes(_stockCode)) {
-    delete results.value[result.key]
+  result.lastChangePercent = previous ? previous.changePercent : 0
+  result.lastProfitAmountToday = previous ? previous.profitAmountToday : 0
+  return result
+}
+
+function updateData(result) {
+  const code = result?.['股票代码']
+  if (!code) return
+  const previousKey = resultKeyByCode.get(code)
+  const previous = previousKey ? results.value[previousKey] : null
+  const prepared = prepareStockResult(result, previous)
+  if (!prepared) return
+  if (previousKey && previousKey !== prepared.key) delete results.value[previousKey]
+  resultKeyByCode.set(code, prepared.key)
+  results.value[prepared.key] = prepared
+  if (!stockCodeSet.value.has(code)) {
+    delete results.value[prepared.key]
+    resultKeyByCode.delete(code)
   }
 }
 
+function updateDataBatch(items) {
+  const currentCodes = new Set(stockCodeSet.value)
+  const previousByCode = new Map()
+  const nextResults = {}
+
+  for (const [key, value] of Object.entries(results.value)) {
+    const code = value?.['股票代码']
+    if (code) previousByCode.set(code, value)
+    if (code && !currentCodes.has(code)) nextResults[key] = value
+  }
+
+  for (const item of items || []) {
+    const prepared = prepareStockResult(item, previousByCode.get(item?.['股票代码']))
+    if (!prepared || !currentCodes.has(prepared['股票代码'])) continue
+    nextResults[prepared.key] = prepared
+  }
+
+  results.value = nextResults
+  resultKeyByCode.clear()
+  for (const value of Object.values(nextResults)) {
+    resultKeyByCode.set(value['股票代码'], value.key)
+  }
+}
+
+const stockUpdateQueue = new Map()
+let stockUpdateFrame = 0
+
+// 股东户数/筹码集中度：季度级低频数据，按自然月缓存到 localStorage（每月底报告期更新，跨月自动失效重拉）
+const holderInfoMap = ref({})
+const HOLDER_CACHE_PREFIX = 'holderInfo_'
+
+function holderCacheMonth() {
+  const d = new Date()
+  return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}`
+}
+
+function readHolderCache(code) {
+  try {
+    const raw = localStorage.getItem(HOLDER_CACHE_PREFIX + holderCacheMonth() + '_' + code)
+    return raw ? JSON.parse(raw) : null
+  } catch (e) {
+    return null
+  }
+}
+
+function writeHolderCache(code, item) {
+  try {
+    localStorage.setItem(HOLDER_CACHE_PREFIX + holderCacheMonth() + '_' + code, JSON.stringify(item))
+  } catch (e) { /* 缓存失败不影响展示 */ }
+}
+
+// 清理历史月份的缓存键，避免 localStorage 无限膨胀
+function pruneHolderCache() {
+  const prefix = HOLDER_CACHE_PREFIX + holderCacheMonth() + '_'
+  const stale = []
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i)
+    if (key && key.startsWith(HOLDER_CACHE_PREFIX) && !key.startsWith(prefix)) {
+      stale.push(key)
+    }
+  }
+  stale.forEach(key => localStorage.removeItem(key))
+}
+
+function isAShareCardCode(code) {
+  const c = String(code || '').toLowerCase()
+  return c.startsWith('sh') || c.startsWith('sz') || c.startsWith('bj')
+}
+
+function loadHolderData() {
+  pruneHolderCache()
+  const pending = stocks.value.filter(code => isAShareCardCode(code) && !holderInfoMap.value[code])
+  if (!pending.length) return
+  // 命中月度缓存直接用，未命中的限流拉取（每批 8 个，避免瞬时打满数据源）
+  let scheduled = false
+  for (const code of pending) {
+    const cached = readHolderCache(code)
+    if (cached) {
+      holderInfoMap.value[code] = cached
+    } else if (!scheduled) {
+      scheduled = true
+      fetchHolderDataBatch(pending.filter(c => !readHolderCache(c)))
+    }
+  }
+}
+
+function fetchHolderDataBatch(codes) {
+  const concurrency = 8
+  let index = 0
+  const worker = () => {
+    if (index >= codes.length) return Promise.resolve()
+    const code = codes[index++]
+    return GetStockHolderNumData(code).then(res => {
+      if (res) {
+        holderInfoMap.value[code] = res
+        writeHolderCache(code, res)
+      }
+    }).catch(() => {}).then(worker)
+  }
+  for (let i = 0; i < Math.min(concurrency, codes.length); i++) worker()
+}
+
+function holderNumText(item) {
+  if (!item?.HOLDER_TOTAL_NUM) return '-'
+  return Number(item.HOLDER_TOTAL_NUM).toLocaleString() + ' 户'
+}
+
+function holderDateText(item) {
+  return String(item?.END_DATE || '').split(' ')[0]
+}
+
+// 股东人数环比：增加=趋于分散（红），减少=筹码趋于集中（绿）
+function holderRatioType(item) {
+  const r = Number(item?.TOTAL_NUM_RATIO)
+  if (!isFinite(r) || r === 0) return 'info'
+  return r > 0 ? 'error' : 'success'
+}
+
+// 卡片「更多」菜单：低频操作收纳，保持主操作行简洁
+function getMoreOptions(result) {
+  const isA = result['买一报价'] > 0
+  const opts = []
+  if (isA) opts.push({ label: '资金', key: 'money' })
+  opts.push({ label: '成交明细', key: 'transaction' })
+  if (isA) {
+    opts.push({ label: '公告', key: 'notice' })
+    opts.push({ label: '研报', key: 'report' })
+  }
+  opts.push({ type: 'divider', key: 'd1' })
+  if (data.openAiEnable) opts.push({ label: 'AI分析', key: 'ai' })
+  opts.push({ label: '取消关注', key: 'unfollow', props: { style: { color: '#E88080' } } })
+  opts.push({ label: '移出分组', key: 'removeGroup', props: { style: { color: '#E88080' } } })
+  return opts
+}
+
+function handleMoreSelect(key, result, groupId) {
+  const code = result['股票代码']
+  const name = result['股票名称']
+  switch (key) {
+    case 'money':
+      showMoney(code, name)
+      break
+    case 'transaction':
+      showTransactionDetail(code, name)
+      break
+    case 'notice':
+      searchNotice(code)
+      break
+    case 'report':
+      searchStockReport(code)
+      break
+    case 'ai':
+      aiCheckStock(name, code)
+      break
+    case 'unfollow':
+      removeMonitor(code, name, result.key)
+      break
+    case 'removeGroup':
+      delStockGroup(code, name, groupId)
+      break
+  }
+}
+
+
+function queueStockUpdate(item) {
+  const code = item?.['股票代码']
+  if (!code || !stockCodeSet.value.has(code)) return
+  stockUpdateQueue.set(code, item)
+  if (stockUpdateFrame) return
+  stockUpdateFrame = requestAnimationFrame(() => {
+    stockUpdateFrame = 0
+    const updates = [...stockUpdateQueue.values()]
+    stockUpdateQueue.clear()
+    for (const update of updates) updateData(update)
+  })
+}
+
+let followLoadSeq = 0
+async function loadFollowStocks(groupId, showLoading = false) {
+  const seq = ++followLoadSeq
+  if (showLoading) message.loading('Loading...')
+  try {
+    // 先渲染分组股票列表（本地查询，页签秒切），行情批量拉取较慢，随后异步填充
+    const list = await GetFollowList(groupId)
+    if (seq !== followLoadSeq || groupId !== currentGroupId.value) return
+    followList.value = Array.isArray(list) ? list : []
+    setFollowStocks(followList.value)
+    loadHolderData()
+    if (showLoading) message.destroyAll()
+    if (!stocks.value.length) showPopover.value = true
+    const infos = await GetFollowStockInfos(groupId)
+    if (seq !== followLoadSeq || groupId !== currentGroupId.value) return
+    updateDataBatch(Array.isArray(infos) ? infos : [])
+  } catch (error) {
+    console.error('加载自选行情失败:', error)
+    message.error('加载自选行情失败: ' + (error?.message || String(error)))
+  } finally {
+    if (seq === followLoadSeq && showLoading) message.destroyAll()
+  }
+}
 
 async function monitor() {
   if (stocks.value && stocks.value.length === 0) {
     showPopover.value = true
   }
-  for (let code of stocks.value) {
-    Greet(code).then(result => {
-      updateData(result)
-    })
+  const groupId = currentGroupId.value
+  try {
+    const infos = await GetFollowStockInfos(groupId)
+    if (groupId !== currentGroupId.value) return
+    updateDataBatch(Array.isArray(infos) ? infos : [])
+  } catch (error) {
+    console.error('刷新自选行情失败:', error)
   }
 }
 
@@ -3644,24 +3897,9 @@ function renderSetConceptLabel(option, stockCode) {
 }
 
 function updateTab(name) {
-  stocks.value = []
   const tabId= Number(name)
   currentGroupId.value = tabId;
-  GetFollowList(tabId).then(result => {
-    followList.value = result
-
-    for (const followedStock of result) {
-      if (followedStock.StockCode.startsWith("us")) {
-        followedStock.StockCode = "gb_" + followedStock.StockCode.replace("us", "").toLowerCase()
-      }
-      stocks.value.push(followedStock.StockCode)
-      Greet(followedStock.StockCode).then(result => {
-        updateData(result)
-      })
-    }
-    //monitor()
-    message.destroyAll()
-  })
+  loadFollowStocks(tabId, true)
 }
 
 function delTab(groupId) {
@@ -3748,9 +3986,9 @@ watch([tdxAmountFilter, filteredTdxTransactionList], () => {
       </n-gradient-text>
     </template>
   </vue-danmaku>
-  <n-tabs type="card" style="--wails-draggable:no-drag"
+  <n-tabs class="stock-page-tabs" type="card" style="--wails-draggable:no-drag"
           :style="{ '--stock-tab-nav-bg': tabNavBgColor }"
-          animated addable :data-currentGroupId="currentGroupId"
+          addable :data-currentGroupId="currentGroupId"
           :value="String(currentGroupId)" @add="addTab" @update:value="updateTab" placement="top" @close="(key)=>{delTab(key)}">
 
     <template #suffix>
@@ -3759,8 +3997,8 @@ watch([tdxAmountFilter, filteredTdxTransactionList], () => {
       </n-button>
     </template>
 
-    <n-tab-pane closable name="0" :tab="'全部'">
-      <div style="margin: 8px;">
+    <n-tab-pane class="stock-page-table-pane" closable name="0" :tab="'全部'" display-directive="show:lazy">
+      <div class="stock-page-table-wrap" style="margin: 8px;">
         <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px; flex-wrap:wrap;">
           <n-input v-model:value="tableSearchKeyword" clearable placeholder="搜索股票名称/代码"
                    style="width:280px;" />
@@ -3780,52 +4018,76 @@ watch([tdxAmountFilter, filteredTdxTransactionList], () => {
           size="small"
           striped
           flex-height
-          style="height: calc(100vh - 190px);"
+          style="height: 100%;"
         />
       </div>
     </n-tab-pane>
-    <n-tab-pane closable v-for="group in groupList" :group-id="group.ID" :name="String(group.ID)" :tab="group.name">
+    <n-tab-pane closable v-for="group in groupList" :group-id="group.ID" :name="String(group.ID)" :tab="group.name" display-directive="show:lazy">
       <n-grid :x-gap="8" :cols="3" :y-gap="8">
         <n-gi :id="result['股票代码']+'_gi'" v-for="result in groupResults" :key="result.key" style="margin-left: 2px;">
           <n-card :data-sort="result.sort" :id="result['股票代码']" :data-code="result['股票代码']" :bordered="true"
                   :title="result['股票名称']" :closable="false"
                   @close="removeMonitor(result['股票代码'],result['股票名称'],result.key)">
+            <!-- 行情区：大字价格 + 涨跌幅 + 盈亏 | 分时走势 -->
             <n-grid :cols="12" :y-gap="6">
               <n-gi :span="6">
-                <n-text :type="result.type">
-                  <n-number-animation :duration="1000" :precision="2" :from="result['上次当前价格']"
-                                      :to="Number(result['当前价格'])"/>
-                  <n-tag size="small" :type="result.type" :bordered="false" v-if="result['盘前盘后']>0">
-                    ({{ result['盘前盘后'] }} {{ result['盘前盘后涨跌幅'] }}%)
-                  </n-tag>
-                </n-text>
-                <n-text style="padding-left: 10px;" :type="result.type">
-                  <n-number-animation :duration="1000" :precision="3" :from="result.lastChangePercent" :to="result.changePercent"/>
-                  %
-                </n-text>&nbsp;
-                <n-text size="small" v-if="result.costVolume>0" :type="result.type">
-                  <n-number-animation :duration="1000" :precision="2" :from="result.lastProfitAmountToday" :to="result.profitAmountToday"/>
-                </n-text>
+                <n-flex vertical :size="2">
+                  <n-flex align="baseline" :size="6">
+                    <n-text :type="result.type" style="font-size: 18px; font-weight: 600;">
+                      <n-number-animation :duration="1000" :precision="2" :from="result['上次当前价格']"
+                                          :to="Number(result['当前价格'])"/>
+                    </n-text>
+                    <n-text :type="result.type" style="font-size: 13px;">
+                      <n-number-animation :duration="1000" :precision="3" :from="result.lastChangePercent" :to="result.changePercent"/>
+                      %
+                    </n-text>
+                  </n-flex>
+                  <n-flex align="center" :size="4">
+                    <n-tag size="tiny" :type="result.type" :bordered="false" v-if="result['盘前盘后']>0">
+                      盘后 {{ result['盘前盘后'] }} {{ result['盘前盘后涨跌幅'] }}%
+                    </n-tag>
+                    <n-text v-if="result.costVolume>0" size="small" :type="result.type">
+                      盈亏 <n-number-animation :duration="1000" :precision="2" :from="result.lastProfitAmountToday" :to="result.profitAmountToday"/>
+                    </n-text>
+                  </n-flex>
+                </n-flex>
               </n-gi>
               <n-gi :span="6">
                 <stock-spark-line :last-price="Number(result['当前价格'])" :open-price="Number(result['昨日收盘价'])"
                                   :stock-code="result['股票代码']" :stock-name="result['股票名称']"></stock-spark-line>
               </n-gi>
             </n-grid>
-            <n-grid :cols="2" :y-gap="4" :x-gap="4">
+            <!-- 关键行情：高/低/昨收/今开 -->
+            <n-grid :cols="4" :y-gap="4" :x-gap="4" style="margin-top: 4px;">
               <n-gi>
-                <n-text :type="'info'">{{ "最高 " + result["今日最高价"] + " " + result.highRate }}%</n-text>
+                <n-text :type="result.highRate >= 0 ? 'error' : 'success'" style="font-size: 12px;">
+                  {{ "高 " + result["今日最高价"] + " " + result.highRate + "%" }}
+                </n-text>
               </n-gi>
               <n-gi>
-                <n-text :type="'info'">{{ "最低 " + result["今日最低价"] + " " + result.lowRate }}%</n-text>
+                <n-text :type="result.lowRate >= 0 ? 'error' : 'success'" style="font-size: 12px;">
+                  {{ "低 " + result["今日最低价"] + " " + result.lowRate + "%" }}
+                </n-text>
               </n-gi>
               <n-gi>
-                <n-text :type="'info'">{{ "昨收 " + result["昨日收盘价"] }}</n-text>
+                <n-text :type="'info'" :depth="3" style="font-size: 12px;">{{ "昨收 " + result["昨日收盘价"] }}</n-text>
               </n-gi>
               <n-gi>
-                <n-text :type="'info'">{{ "今开 " + result["今日开盘价"] }}</n-text>
+                <n-text :type="'info'" :depth="3" style="font-size: 12px;">{{ "今开 " + result["今日开盘价"] }}</n-text>
               </n-gi>
             </n-grid>
+            <!-- 股东数据：单行紧凑展示 -->
+            <n-flex v-if="isAShareCardCode(result['股票代码']) && holderInfoMap[result['股票代码']]" align="center" :size="6" style="margin-top: 4px;">
+              <n-text v-if="holderDateText(holderInfoMap[result['股票代码']])" :type="'info'" :depth="3" style="font-size: 12px;">{{ holderDateText(holderInfoMap[result['股票代码']]) }}期</n-text>
+              <n-text style="font-size: 12px;">股东 {{ holderNumText(holderInfoMap[result['股票代码']]) }}</n-text>
+              <n-text v-if="holderInfoMap[result['股票代码']].TOTAL_NUM_RATIO !== null && holderInfoMap[result['股票代码']].TOTAL_NUM_RATIO !== undefined"
+                      :type="holderRatioType(holderInfoMap[result['股票代码']])" style="font-size: 12px;">
+                环比 {{ Number(holderInfoMap[result['股票代码']].TOTAL_NUM_RATIO) >= 0 ? '+' : '' }}{{ Number(holderInfoMap[result['股票代码']].TOTAL_NUM_RATIO).toFixed(2) }}%
+              </n-text>
+              <n-text v-if="holderInfoMap[result['股票代码']].HOLD_FOCUS" :type="'info'" :depth="3" style="font-size: 12px;">
+                筹码{{ holderInfoMap[result['股票代码']].HOLD_FOCUS }}
+              </n-text>
+            </n-flex>
             <n-collapse accordion v-if="result['买一报价']>0">
               <n-collapse-item title="盘口" name="1" v-if="result['买一报价']>0">
                 <template #header-extra>
@@ -3873,77 +4135,60 @@ watch([tdxAmountFilter, filteredTdxTransactionList], () => {
               </n-collapse-item>
             </n-collapse>
             <template #header-extra>
-
-              <n-tag size="small" :bordered="false">{{ result['股票代码'] }}</n-tag>&nbsp;
-              <n-button size="tiny" secondary type="primary"
-                        @click="removeMonitor(result['股票代码'],result['股票名称'],result.key)">
-                取消关注
-              </n-button>&nbsp;
-
-              <n-button size="tiny" v-if="data.openAiEnable" secondary type="warning"
-                        @click="aiCheckStock(result['股票名称'],result['股票代码'])">
-                AI分析
-              </n-button>
-              <n-button secondary type="error" size="tiny"
-                        @click="delStockGroup(result['股票代码'],result['股票名称'],group.ID)">移出分组
-              </n-button>
+              <n-tag size="small" :bordered="false">{{ result['股票代码'] }}</n-tag>
             </template>
             <template #footer>
-              <n-flex vertical :size="8">
-                <n-flex justify="center">
-                  <n-text :type="'info'">{{ result["日期"] + " " + result["时间"] }}</n-text>
-                  <n-tag size="small" v-if="result.volume>0" :type="result.profitType">{{ result.volume + "股" }}</n-tag>
-                  <n-tag size="small" v-if="result.costPrice>0" :type="result.profitType">
-                    {{
-                      "成本:" + result.costPrice + "*" + result.costVolume + " " + result.profit + "%" + " ( " + result.profitAmount + " ¥ )"
-                    }}
-                  </n-tag>
-                </n-flex>
-                <n-flex justify="center">
-                  <n-button size="tiny" type="primary" secondary
-                            @click="showLightweightKline(result['股票代码'],result['股票名称'])">
-                    多周期K线
-                  </n-button>
-                </n-flex>
+              <n-flex justify="center" align="center" :size="6">
+                <n-text :type="'info'" :depth="3" style="font-size: 12px;">{{ result["日期"] + " " + result["时间"] }}</n-text>
+                <n-tag size="small" v-if="result.volume>0" :type="result.profitType">{{ result.volume + "股" }}</n-tag>
+                <n-tag size="small" v-if="result.costPrice>0" :type="result.profitType">
+                  {{ "成本:" + result.costPrice + "*" + result.costVolume + " " + result.profit + "% (" + result.profitAmount + "¥)" }}
+                </n-tag>
+                <n-button size="tiny" type="primary" secondary
+                          @click="showLightweightKline(result['股票代码'],result['股票名称'])">
+                  多周期K线
+                </n-button>
               </n-flex>
             </template>
             <template #action>
-              <n-flex justify="left">
-                <n-button size="tiny" type="warning" @click="setStock(result['股票代码'],result['股票名称'])"> 成本
-                </n-button>
-                <n-button size="tiny" type="error"
-                          @click="showFenshi(result['股票代码'],result['股票名称'],result.changePercent)"> 分时
-                </n-button>
-                <n-button size="tiny" type="info"
-                          @click="showTransactionDetail(result['股票代码'],result['股票名称'])"> 成交明细
-                </n-button>
-                <n-button size="tiny" type="error" @click="showK(result['股票代码'],result['股票名称'])"> 日K</n-button>
-                <n-button size="tiny" type="error" v-if="result['买一报价']>0"
-                          @click="showMoney(result['股票代码'],result['股票名称'])"> 资金
-                </n-button>
-                <n-button size="tiny" type="success" @click="search(result['股票代码'],result['股票名称'])"> 详情
-                </n-button>
-                <n-button v-if="result['买一报价']>0" size="tiny" type="success"
-                          @click="searchNotice(result['股票代码'])"> 公告
-                </n-button>
-                <n-button v-if="result['买一报价']>0" size="tiny" type="success"
-                          @click="searchStockReport(result['股票代码'])"> 研报
-                </n-button>
-                <n-flex justify="right">
+              <n-flex justify="space-between" align="center" :size="4">
+                <n-flex :size="4">
+                  <n-button size="tiny" type="warning" secondary @click="setStock(result['股票代码'],result['股票名称'])">成本</n-button>
+                  <n-button size="tiny" type="error" secondary
+                            @click="showFenshi(result['股票代码'],result['股票名称'],result.changePercent)">分时</n-button>
+                  <n-button size="tiny" type="error" secondary @click="showK(result['股票代码'],result['股票名称'])">日K</n-button>
+                  <n-button size="tiny" type="success" secondary @click="search(result['股票代码'],result['股票名称'])">详情</n-button>
+                </n-flex>
+                <n-flex :size="4">
                   <n-dropdown trigger="click" :options="setGroupOptions"
                               :menu-props="() => ({ style: 'max-height:300px; overflow-y:auto;' })"
                               :render-label="(option) => renderSetGroupLabel(option, result['股票代码'])"
                               @select="(groupId) => handleSetGroupSelect(groupId, result['股票代码'], result['股票名称'])">
-                    <n-button type="warning" size="tiny">设置分组</n-button>
+                    <n-button type="warning" size="tiny" quaternary>分组</n-button>
                   </n-dropdown>
                   <n-dropdown trigger="click" :options="setConceptOptions"
                               :menu-props="() => ({ style: 'max-height:300px; overflow-y:auto;' })"
                               :render-label="(option) => renderSetConceptLabel(option, result['股票代码'])"
                               @select="(conceptId) => handleSetConceptSelect(conceptId, result['股票代码'], result['股票名称'])">
-                    <n-button type="info" size="tiny">设置概念</n-button>
+                    <n-button type="info" size="tiny" quaternary>概念</n-button>
+                  </n-dropdown>
+                  <n-dropdown trigger="click" :options="getMoreOptions(result)"
+                              :menu-props="() => ({ style: 'max-height:300px; overflow-y:auto;' })"
+                              @select="(key) => handleMoreSelect(key, result, group.ID)">
+                    <n-button size="tiny" quaternary>更多▾</n-button>
                   </n-dropdown>
                 </n-flex>
               </n-flex>
+            </template>
+          </n-card>
+        </n-gi>
+        <!-- 行情返回前的占位卡片：页签切换立即可见，避免空白等待 -->
+        <n-gi v-for="item in pendingGroupStocks" :key="'pending_' + item.StockCode" style="margin-left: 2px;">
+          <n-card :id="item.StockCode" :data-code="item.StockCode" :title="item.Name" :bordered="true">
+            <n-skeleton text width="65%" />
+            <n-skeleton text width="40%" />
+            <template #header-extra>
+              <n-tag size="small" :bordered="false">{{ item.StockCode }}</n-tag>
             </template>
           </n-card>
         </n-gi>
@@ -4372,6 +4617,39 @@ watch([tdxAmountFilter, filteredTdxTransactionList], () => {
 </template>
 
 <style scoped>
+.stock-page-tabs {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.stock-page-tabs :deep(.n-tabs-nav) {
+  flex: 0 0 auto;
+}
+.stock-page-tabs :deep(.n-tabs-pane-wrapper),
+.stock-page-tabs :deep(.n-tab-pane) {
+  flex: 1 1 0;
+  min-height: 0;
+}
+.stock-page-tabs :deep(.n-tab-pane) {
+  height: 100%;
+  overflow: auto;
+}
+.stock-page-tabs :deep(.stock-page-table-pane) {
+  display: flex;
+  overflow: hidden;
+}
+.stock-page-table-wrap {
+  width: 100%;
+  min-height: 0;
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+}
+.stock-page-table-wrap > .n-data-table {
+  flex: 1 1 0;
+  min-height: 0;
+}
 .md-editor-preview h3 {
   text-align: center !important;
 }
