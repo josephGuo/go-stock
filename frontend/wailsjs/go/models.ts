@@ -847,6 +847,24 @@ export namespace agent {
 	        this.aiConfigName = source["aiConfigName"];
 	    }
 	}
+	export class LTMMemoryRetentionSetting {
+	    maxCount: number;
+	    retentionDays: number;
+	    maxCountDefault: number;
+	    retentionDaysDefault: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new LTMMemoryRetentionSetting(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.maxCount = source["maxCount"];
+	        this.retentionDays = source["retentionDays"];
+	        this.maxCountDefault = source["maxCountDefault"];
+	        this.retentionDaysDefault = source["retentionDaysDefault"];
+	    }
+	}
 	export class MemoryRecall {
 	    question: string;
 	    reply: string;
@@ -3796,6 +3814,8 @@ export namespace data {
 	    longTermMemoryAiConfigId: number;
 	    profileLearnAiConfigId: number;
 	    signalScanIntervalSec: number;
+	    longTermMemoryMaxCount: number;
+	    longTermMemoryRetentionDays: number;
 	    aiConfigs: AIConfig[];
 	
 	    static createFrom(source: any = {}) {
@@ -3905,6 +3925,8 @@ export namespace data {
 	        this.longTermMemoryAiConfigId = source["longTermMemoryAiConfigId"];
 	        this.profileLearnAiConfigId = source["profileLearnAiConfigId"];
 	        this.signalScanIntervalSec = source["signalScanIntervalSec"];
+	        this.longTermMemoryMaxCount = source["longTermMemoryMaxCount"];
+	        this.longTermMemoryRetentionDays = source["longTermMemoryRetentionDays"];
 	        this.aiConfigs = this.convertValues(source["aiConfigs"], AIConfig);
 	    }
 	

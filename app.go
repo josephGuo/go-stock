@@ -481,9 +481,20 @@ func (a *App) CheckUpdate(flag int) {
 			}
 		}
 
-		commitMessage := releaseVersion.Body
-		if releaseVersion.Commit.Message != "" {
-			commitMessage = releaseVersion.Commit.Message
+		// 优先展示 Release 说明（Body），仅当其为空时才回退到 tag 指向的提交信息，
+		// 否则版本提交（如 "release: vX.Y.Z"）会覆盖真正的更新内容。
+		// 提交信息为无意义的版本号提交（如 "release: v2026.11.27.2"）时同样视为空，
+		// 避免通知里只显示一个版本号而没有更新内容。
+		commitMessage := strings.TrimSpace(releaseVersion.Body)
+		if commitMessage == "" && releaseVersion.Commit.Message != "" {
+			msg := strings.TrimSpace(releaseVersion.Commit.Message)
+			if !isTrivialReleaseCommit(msg, releaseVersion.TagName) {
+				commitMessage = msg
+			}
+		}
+		if commitMessage == "" {
+			// Body 与提交信息均无有效内容时给出引导文案，避免通知里除进度条外一片空白
+			commitMessage = "本次更新详情请前往 GitHub 发布页查看。"
 		}
 
 		downloadUrl := ""
@@ -709,6 +720,39 @@ func (a *App) CheckUpdate(flag int) {
 
 	}
 
+}
+
+// isTrivialReleaseCommit 判断提交信息是否为无意义的版本发布提交（如 "release: v2026.11.27.2"）。
+// 这类提交不包含任何更新内容，通知展示时应跳过，避免更新提醒里只出现一个版本号。
+func isTrivialReleaseCommit(message, tagName string) bool {
+	msg := strings.ToLower(strings.TrimSpace(message))
+	// 提交信息与 tag 名一致视为版本提交
+	if msg == strings.ToLower(strings.TrimSpace(tagName)) {
+		return true
+	}
+	// 形如 "release: vX.Y.Z" / "release vX.Y.Z" / "发布 vX.Y.Z" 的提交，
+	// 前缀后仅剩纯版本号才算无意义提交，"release: 修复 xx 问题" 应正常展示
+	releasePrefixes := []string{"release:", "release ", "发布", "版本发布", "bump version", "bump to"}
+	for _, prefix := range releasePrefixes {
+		if strings.HasPrefix(msg, prefix) {
+			return isVersionOnly(strings.TrimSpace(strings.TrimPrefix(msg, prefix)))
+		}
+	}
+	return false
+}
+
+// isVersionOnly 判断字符串是否为纯版本号（可选 v 前缀 + 数字点分串，如 "v2026.11.27.2"）
+func isVersionOnly(s string) bool {
+	s = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(s), "v"))
+	if s == "" {
+		return true
+	}
+	for _, r := range s {
+		if (r < '0' || r > '9') && r != '.' {
+			return false
+		}
+	}
+	return true
 }
 
 // buildRestartArgs 构造重启命令参数：注入 -wait-parent=<当前进程PID>，
@@ -4860,6 +4904,23 @@ func (a *App) GetLongTermMemoryAiConfigId() int {
 // SetLongTermMemoryAiConfigId 设置长期记忆绑定的向量服务 ID
 func (a *App) SetLongTermMemoryAiConfigId(id int) error {
 	return agent.NewKnowledgeBaseApi().SetLongTermMemoryAiConfigId(id)
+}
+
+// GetLongTermMemoryRetentionSetting 读取长期记忆保留策略设置（条数上限/保留天数，含默认值）
+func (a *App) GetLongTermMemoryRetentionSetting() *agent.LTMMemoryRetentionSetting {
+	return agent.NewKnowledgeBaseApi().GetLongTermMemoryRetentionSetting()
+}
+
+// warmupVectorStore 后台预热向量库（startup 调用）：完成一次性迁移并加载持久化库，
+// 使打开知识库/长期记忆页签及 Agent 首次检索零等待。异步执行，不阻塞启动。
+func (a *App) warmupVectorStore() {
+	agent.WarmupVectorStores()
+}
+
+// SetLongTermMemoryRetentionSetting 设置长期记忆保留策略（任意一项 <=0 恢复默认），
+// 保存后立即触发一次后台清理使新配置生效
+func (a *App) SetLongTermMemoryRetentionSetting(maxCount int, retentionDays int) error {
+	return agent.NewKnowledgeBaseApi().SetLongTermMemoryRetentionSetting(maxCount, retentionDays)
 }
 
 // ListKnowledgeBases 列出所有知识库（按创建时间升序）
